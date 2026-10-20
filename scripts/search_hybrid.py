@@ -388,13 +388,11 @@ def load_search_resources():
     }
 
 
+
 def search(question, resources, top_k=TOP_K, verbose=False):
     """
     Executa busca vetorial + BM25 + RRF + reranking.
-
-    Retorna lista de tuplas (chunk_id, item), mantendo o formato
-    esperado por print_results(). Os recursos são carregados à parte
-    para que várias perguntas reutilizem os mesmos modelos.
+    Mantém o retorno original e permite inspecionar as posições.
     """
     question = question.strip()
     if not question:
@@ -421,6 +419,23 @@ def search(question, resources, top_k=TOP_K, verbose=False):
         ]
     )
 
+    # Diagnóstico: posição do chunk das metas antes do reranking.
+    target = (
+        "document:Diretrizes de Gestão de Pessoas_ "
+        "Excelência Operacional e Preservação da Cultura (1):chunk:0005"
+    )
+
+    if verbose:
+        print("\n--- DIAGNÓSTICO: ANTES DO RERANKING ---")
+        for rank, (chunk_id, item) in enumerate(fused_results, start=1):
+            if chunk_id == target:
+                print(f"Chunk das metas encontrado na posição RRF: {rank}")
+                print(f"Pontuação RRF: {item['score']:.6f}")
+                print(f"Posições nas buscas: {item['ranks']}")
+                break
+        else:
+            print("Chunk das metas não encontrado entre os candidatos do RRF.")
+
     results = rerank_results(
         question,
         fused_results,
@@ -428,7 +443,16 @@ def search(question, resources, top_k=TOP_K, verbose=False):
     )
 
     if verbose:
-        print(f"Pergunta: {question}")
+        print("\n--- DIAGNÓSTICO: DEPOIS DO RERANKING ---")
+        for rank, (chunk_id, item) in enumerate(results, start=1):
+            if chunk_id == target:
+                print(f"Chunk das metas na posição após reranking: {rank}")
+                print(f"Pontuação reranker: {item['rerank_score']:.6f}")
+                break
+        else:
+            print("Chunk das metas não foi avaliado pelo reranker.")
+
+        print(f"\nPergunta: {question}")
         print(f"Chunks no corpus BM25: {len(resources['chunks'])}")
         print(f"Chunks no Chroma: {resources['collection_size']}")
         print(
@@ -440,7 +464,6 @@ def search(question, resources, top_k=TOP_K, verbose=False):
         print_results(results[:top_k])
 
     return results[:top_k]
-
 
 # --------------------------------------------------
 # Execução principal

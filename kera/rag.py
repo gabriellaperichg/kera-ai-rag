@@ -1,35 +1,36 @@
 
-from scripts.search_hybrid import load_search_resources, search
+import time
 
+from scripts.search_hybrid import search
 from kera.llm import generate_answer
 
 
 SYSTEM_PROMPT = """
 Você é o Kera AI, assistente de gestão operacional e comercial de clínicas.
+Responda em português brasileiro, com clareza, organização visual e linguagem profissional.
 
-REGRAS OBRIGATÓRIAS:
+REGRAS DE CONTEÚDO:
+- Use os trechos fornecidos como fonte factual. Não invente números, metas ou regras.
+- Responda à pergunta com as informações relevantes que estiverem nos trechos.
+- Não diga que uma informação está ausente se ela estiver explícita no contexto.
+- Quando houver divergência, diferencie documento formal de transcrição e explique a divergência.
+- Cite as fontes usando somente os identificadores [S1], [S2] etc. fornecidos no contexto.
+- Se faltar apenas parte da resposta, responda o que está comprovado e indique especificamente o que faltou.
 
-1. Responda em português brasileiro, com clareza e objetividade.
-2. Use exclusivamente as evidências presentes no contexto fornecido.
-3. Não invente metas, frequências, procedimentos, exceções ou regras.
-4. Se o contexto não sustentar uma resposta completa, explique o que
-   é possível afirmar e o que não está especificado nas fontes.
-5. Se não houver evidência suficiente para responder, admita isso
-   explicitamente. Não preencha lacunas com conhecimento geral.
-6. Cite as evidências no texto usando os identificadores [S1], [S2]
-   etc. Use somente identificadores existentes no contexto.
-7. Diferencie documentos formais de transcrições:
-   - Documento formal: diretriz ou documentação estratégica.
-   - Transcrição: relato prático de uma pessoa entrevistada.
-   Não apresente um relato de transcrição como regra formal da empresa.
-8. Se duas fontes apresentarem informações diferentes, informe a
-   diferença sem escolher uma delas arbitrariamente.
-9. Não diga que consultou uma fonte se ela não estiver no contexto.
-10. Não invente páginas ou referências.
+REGRAS DE FORMATAÇÃO:
+- Comece pela resposta, sem frases introdutórias como "Baseado nas informações fornecidas, aqui está...".
+- Use parágrafos curtos, separados por uma linha em branco.
+- Quando comparar metas ou indicadores, use uma tabela Markdown real, com cada linha em uma linha separada.
+- Tabelas devem ter cabeçalho, linha separadora e uma linha por indicador. Nunca escreva uma tabela inteira dentro de um parágrafo.
+- Use títulos curtos em negrito somente quando ajudarem a leitura.
+- Não repita abaixo da tabela os mesmos dados que já estão nela.
+- Evite conclusões genéricas, repetições e explicações que não foram solicitadas.
+- Preserve todos os números e suas associações corretas; não misture metas de etapas diferentes.
 """
 
 
 def _format_pages(metadata: dict) -> str:
+    """Converte os metadados de páginas em texto legível."""
     pages = metadata.get("pages")
 
     if isinstance(pages, (list, tuple)):
@@ -51,51 +52,122 @@ def _format_pages(metadata: dict) -> str:
 
 
 def _prepare_sources(results: list) -> list:
+    """
+    Converte os resultados de search_hybrid.py em fontes normalizadas.
+
+    Formato esperado:
+        (chunk_id, {
+            "score": ...,
+            "result": {
+                "text": "...",
+                "metadata": {...}
+            }
+        })
+    """
     sources = []
 
-    for chunk_id, item in results:
-        metadata = item.get("metadata") or {}
+    if not results:
+        print("[RAG] A busca não retornou resultados.", flush=True)
+        return sources
 
-        # Compatibilidade com resultados que trazem campos na raiz.
-        if not metadata:
-            metadata = item
+    for position, entry in enumerate(results, start=1):
+        try:
+            if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+                print(
+                    f"[RAG] Resultado {position} em formato inválido.",
+                    flush=True,
+                )
+                continue
 
-        text = item.get("text", "")
-        source_type = metadata.get("source_type", "unknown")
+            chunk_id, item = entry
 
-        if source_type == "transcript":
-            source_label = "Transcrição"
-        elif source_type == "document":
-            source_label = "Documento formal"
-        else:
-            source_label = "Tipo de fonte não identificado"
+            if not isinstance(item, dict):
+                print(
+                    f"[RAG] Resultado {position} não é um dicionário.",
+                    flush=True,
+                )
+                continue
 
-        document_name = metadata.get(
-            "document_name",
-            metadata.get("document_id", "Documento não identificado"),
-        )
+            # O resultado observado no terminal contém os dados em "result".
+            nested = item.get("result") or {}
 
-        sources.append({
-            "id": f"S{len(sources) + 1}",
-            "chunk_id": chunk_id,
-            "document_name": document_name,
-            "source_type": source_type,
-            "source_label": source_label,
-            "pages": _format_pages(metadata),
-            "text": text,
-            "rerank_score": item.get("rerank_score"),
-        })
+            if not isinstance(nested, dict):
+                nested = {}
+
+            metadata = (
+                nested.get("metadata")
+                or item.get("metadata")
+                or {}
+            )
+
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            text = nested.get("text") or item.get("text") or ""
+
+            if not isinstance(text, str):
+                text = str(text)
+
+            text = text.strip()
+
+            if not text:
+                print(
+                    f"[RAG] Resultado sem texto: {chunk_id}",
+                    flush=True,
+                )
+                continue
+
+            source_type = metadata.get("source_type", "unknown")
+
+            if source_type == "transcript":
+                source_label = "Transcrição"
+            elif source_type == "document":
+                source_label = "Documento formal"
+            else:
+                source_label = "Tipo de fonte não identificado"
+
+            document_name = metadata.get(
+                "document_name",
+                metadata.get("document_id", "Documento não identificado"),
+            )
+
+            sources.append({
+                "id": f"S{len(sources) + 1}",
+                "chunk_id": str(chunk_id),
+                "document_name": str(document_name),
+                "source_type": source_type,
+                "source_label": source_label,
+                "pages": _format_pages(metadata),
+                "text": text,
+                "score": item.get("score"),
+                "rerank_score": item.get("rerank_score"),
+                "metadata": metadata,
+            })
+
+        except Exception as exc:
+            print(
+                f"[RAG] Erro ao processar resultado {position}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    print(
+        f"[RAG] Resultados recebidos: {len(results)} | "
+        f"Fontes válidas: {len(sources)}",
+        flush=True,
+    )
 
     return sources
 
 
 def _build_context(sources: list) -> str:
+    """Monta o contexto com identificadores de citação."""
     blocks = []
 
     for source in sources:
         blocks.append(
             f"[{source['id']}]\n"
-            f"Tipo: {source['source_label']}\n"
+            f"Tipo de fonte: {source['source_label']}\n"
             f"Documento: {source['document_name']}\n"
             f"Páginas: {source['pages']}\n"
             f"Trecho:\n{source['text']}"
@@ -104,16 +176,130 @@ def _build_context(sources: list) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+def _build_user_prompt(question: str, context: str) -> str:
+    """Monta instruções para uma resposta legível sem alterar a recuperação."""
+    return f"""PERGUNTA:
+{question}
+
+FONTES DISPONÍVEIS:
+{context}
+
+Responda diretamente à pergunta usando somente as fontes acima.
+Se a pergunta envolver metas ou indicadores, organize os dados em uma tabela Markdown
+com as colunas mais adequadas (por exemplo: Indicador, Meta mínima e Meta ideal).
+Escreva cada linha da tabela em uma linha separada e inclua a linha separadora Markdown.
+Coloque uma linha em branco antes e depois da tabela.
+Associe cada número à etapa correta e cite a fonte na mesma linha quando aplicável.
+Se parte da resposta não estiver documentada, indique exatamente qual parte falta.
+Não inclua introdução genérica, não repita os dados da tabela em prosa e use parágrafos curtos."""
+
+
+def _format_answer(answer: str) -> str:
+    """Melhora espaçamento e transforma tabelas compactadas em Markdown legível."""
+    answer = (answer or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    # Se o modelo inseriu uma tabela no meio de um parágrafo, separa o bloco.
+    headers = (
+        "Indicador | Meta Mínima",
+        "Indicador | Meta mínima",
+        "Etapa | Meta Mínima",
+        "Etapa | Meta mínima",
+    )
+    for header in headers:
+        idx = answer.find(header)
+        if idx > 0:
+            answer = answer[:idx].rstrip() + "\n\n" + answer[idx:]
+            break
+
+    # Corrige o formato específico de tabela que o modelo costuma compactar.
+    # Mantém os dados gerados pelo modelo; apenas reorganiza sua apresentação.
+    compact_table = re.search(
+        r"(Indicador\s*\|\s*Meta\s*Mínima\s*\|\s*Meta\s*Ideal)(.*)",
+        answer,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if compact_table:
+        prefix = answer[:compact_table.start()].rstrip()
+        table_tail = compact_table.group(2).strip()
+        table_tail = re.sub(
+            r"\s+(Leads Recebidos|Agendamentos|Comparecimento|Vendas)\s*\|",
+            r"\n\1 |",
+            table_tail,
+            flags=re.IGNORECASE,
+        )
+        table = "Indicador | Meta Mínima | Meta Ideal\n|---|---:|---:|\n" + table_tail
+        # Evita deixar a frase de conclusão colada ao último valor da tabela.
+        table = re.sub(
+            r"(\|\s*[^|\n]+)\s+(Essas metas|Esses indicadores|A meta ideal|Esses resultados)\b",
+            r"\1\n\n\2",
+            table,
+            flags=re.IGNORECASE,
+        )
+        answer = (prefix + "\n\n" if prefix else "") + table
+
+    # Normaliza espaços e adiciona respiro entre parágrafos e tabelas.
+    lines = [line.rstrip() for line in answer.split("\n")]
+    formatted = []
+    for i, line in enumerate(lines):
+        current = line.strip()
+        is_table = "|" in current
+        prev_is_table = bool(formatted and "|" in formatted[-1].strip())
+        next_is_table = i + 1 < len(lines) and "|" in lines[i + 1].strip()
+        if is_table and formatted and formatted[-1].strip() and not prev_is_table:
+            formatted.append("")
+        formatted.append(line)
+        if is_table and not next_is_table and i + 1 < len(lines) and lines[i + 1].strip():
+            formatted.append("")
+
+    answer = "\n".join(formatted)
+    answer = re.sub(r"\n{3,}", "\n\n", answer)
+    return answer.strip()
+
+
 def answer_question(question: str, resources: dict) -> dict:
-    question = question.strip()
+    """Recupera evidências e gera uma resposta fundamentada."""
+    question = (question or "").strip()
 
     if not question:
-        raise ValueError("Digite uma pergunta.")
+        return {
+            "answer": "Digite uma pergunta.",
+            "sources": [],
+        }
 
-    results = search(question, resources)
-    sources = _prepare_sources(results)
+    print("\n=== KERA RAG ===", flush=True)
+    print(f"[RAG] Pergunta: {question}", flush=True)
 
-    if not sources or not any(source["text"].strip() for source in sources):
+    # Etapa 1: busca. Mantemos o mecanismo e os parâmetros atuais.
+    start_search = time.perf_counter()
+
+    try:
+        # O teste mostrou que um trecho relevante pode ficar em 8º lugar.
+        # Mantemos até 8 resultados no contexto para não descartá-lo cedo demais.
+        results = search(question, resources, top_k=8)
+    except Exception as exc:
+        print(
+            f"[RAG] Erro na busca: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return {
+            "answer": (
+                "Não foi possível pesquisar a base de conhecimento. "
+                "Confira o terminal para ver o erro."
+            ),
+            "sources": [],
+        }
+
+    print(
+        f"[RAG] Busca concluída em "
+        f"{time.perf_counter() - start_search:.2f}s; "
+        f"resultados: {len(results) if results else 0}.",
+        flush=True,
+    )
+
+    # Etapa 2: normalização das fontes.
+    sources = _prepare_sources(results or [])
+
+    if not sources:
         return {
             "answer": (
                 "Não encontrei trechos de texto suficientes para "
@@ -124,20 +310,53 @@ def answer_question(question: str, resources: dict) -> dict:
 
     context = _build_context(sources)
 
-    user_prompt = f"""
-PERGUNTA:
-{question}
+    print(
+        f"[RAG] Contexto montado: {len(context)} caracteres, "
+        f"{len(sources)} fontes.",
+        flush=True,
+    )
 
-CONTEXTO RECUPERADO:
-{context}
+    # Etapa 3: prompt específico para a pergunta.
+    user_prompt = _build_user_prompt(question, context)
 
-INSTRUÇÃO FINAL:
-Responda à pergunta usando somente o contexto recuperado.
-Inclua citações [S1], [S2] etc. junto às afirmações que sustentam.
-Se os trechos não forem suficientes, diga isso claramente.
-"""
+    # Etapa 4: geração pelo Ollama.
+    print("[RAG] Enviando contexto ao modelo...", flush=True)
+    start_generation = time.perf_counter()
 
-    answer = generate_answer(SYSTEM_PROMPT, user_prompt)
+    try:
+        answer = generate_answer(SYSTEM_PROMPT, user_prompt)
+    except Exception as exc:
+        print(
+            f"[RAG] Erro na geração: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return {
+            "answer": (
+                "Não foi possível gerar a resposta pelo modelo de linguagem. "
+                "Confira se o Ollama está funcionando e veja o erro no terminal."
+            ),
+            "sources": sources,
+        }
+
+    elapsed = time.perf_counter() - start_generation
+
+    if not isinstance(answer, str) or not answer.strip():
+        print("[RAG] O modelo retornou uma resposta vazia.", flush=True)
+        return {
+            "answer": (
+                "O modelo não retornou uma resposta válida. "
+                "Tente novamente."
+            ),
+            "sources": sources,
+        }
+
+    answer = answer.strip()
+
+    print(
+        f"[RAG] Geração concluída em {elapsed:.2f}s; "
+        f"resposta: {len(answer)} caracteres.",
+        flush=True,
+    )
 
     return {
         "answer": answer,
