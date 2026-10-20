@@ -342,6 +342,107 @@ def print_results(results):
 
 
 # --------------------------------------------------
+# Preparação reutilizável dos recursos de busca
+# --------------------------------------------------
+
+def load_search_resources():
+    """Carrega uma única vez os recursos usados em várias consultas."""
+    print("Carregando chunks para BM25...")
+    chunks = load_chunks()
+
+    corpus = [
+        tokenize(get_chunk_text(chunk))
+        for chunk in chunks
+    ]
+    bm25 = BM25Okapi(corpus)
+
+    print("Conectando ao Chroma...")
+    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+
+    try:
+        collection = client.get_collection(name=COLLECTION_NAME)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Não foi possível abrir a coleção '{COLLECTION_NAME}'. "
+            "Verifique se o índice Chroma foi criado."
+        ) from exc
+
+    collection_size = collection.count()
+    if collection_size == 0:
+        raise ValueError("A coleção Chroma está vazia.")
+
+    print("Carregando modelo de embeddings...")
+    model = SentenceTransformer(MODEL_NAME)
+
+    print("Carregando reranker...")
+    reranker = CrossEncoder(RERANKER_NAME)
+
+    return {
+        "chunks": chunks,
+        "bm25": bm25,
+        "client": client,
+        "collection": collection,
+        "model": model,
+        "reranker": reranker,
+        "collection_size": collection_size,
+    }
+
+
+def search(question, resources, top_k=TOP_K, verbose=False):
+    """
+    Executa busca vetorial + BM25 + RRF + reranking.
+
+    Retorna lista de tuplas (chunk_id, item), mantendo o formato
+    esperado por print_results(). Os recursos são carregados à parte
+    para que várias perguntas reutilizem os mesmos modelos.
+    """
+    question = question.strip()
+    if not question:
+        return []
+
+    vector_results = search_vector(
+        question,
+        resources["model"],
+        resources["collection"],
+        top_k=CANDIDATE_K,
+    )
+
+    bm25_results = search_bm25(
+        question,
+        resources["chunks"],
+        resources["bm25"],
+        top_k=CANDIDATE_K,
+    )
+
+    fused_results = reciprocal_rank_fusion(
+        [
+            ("vetorial", vector_results),
+            ("BM25", bm25_results),
+        ]
+    )
+
+    results = rerank_results(
+        question,
+        fused_results,
+        resources["reranker"],
+    )
+
+    if verbose:
+        print(f"Pergunta: {question}")
+        print(f"Chunks no corpus BM25: {len(resources['chunks'])}")
+        print(f"Chunks no Chroma: {resources['collection_size']}")
+        print(
+            "Candidatos recuperados: "
+            f"vetorial={len(vector_results)}, "
+            f"BM25={len(bm25_results)}"
+        )
+        print(f"Candidatos únicos após RRF: {len(fused_results)}")
+        print_results(results[:top_k])
+
+    return results[:top_k]
+
+
+# --------------------------------------------------
 # Execução principal
 # --------------------------------------------------
 
@@ -354,106 +455,12 @@ def main():
         return
 
     question = " ".join(sys.argv[1:]).strip()
-
     if not question:
         print("Informe uma pergunta.")
         return
 
-    # 1. Carregar os chunks
-    print("Carregando chunks para BM25...")
-    chunks = load_chunks()
-
-    # 2. Preparar o índice lexical em memória
-    corpus = [
-        tokenize(get_chunk_text(chunk))
-        for chunk in chunks
-    ]
-    bm25 = BM25Okapi(corpus)
-
-    # 3. Conectar ao Chroma
-    print("Conectando ao Chroma...")
-    client = chromadb.PersistentClient(
-        path=str(CHROMA_PATH)
-    )
-
-    try:
-        collection = client.get_collection(
-            name=COLLECTION_NAME
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"Não foi possível abrir a coleção "
-            f"'{COLLECTION_NAME}'. Verifique o índice Chroma."
-        ) from exc
-
-    collection_size = collection.count()
-
-    if collection_size == 0:
-        raise ValueError("A coleção Chroma está vazia.")
-
-    # 4. Carregar o modelo de embeddings
-    print("Carregando modelo de embeddings...")
-    model = SentenceTransformer(MODEL_NAME)
-
-    # 5. Carregar o reranker
-    print("Carregando reranker...")
-    reranker = CrossEncoder(RERANKER_NAME)
-
-    print(f"\nPergunta: {question}")
-    print(f"Chunks no corpus BM25: {len(chunks)}")
-    print(f"Chunks no Chroma: {collection_size}")
-
-    # 6. Recuperar candidatos pelos dois métodos
-    print("\nExecutando busca vetorial...")
-    vector_results = search_vector(
-        question,
-        model,
-        collection,
-        top_k=CANDIDATE_K,
-    )
-
-    print("Executando busca BM25...")
-    bm25_results = search_bm25(
-        question,
-        chunks,
-        bm25,
-        top_k=CANDIDATE_K,
-    )
-
-    print(
-        "\nCandidatos recuperados: "
-        f"vetorial={len(vector_results)}, "
-        f"BM25={len(bm25_results)}"
-    )
-
-    # 7. Combinar os rankings
-    print("\nCombinando rankings com RRF...")
-    fused_results = reciprocal_rank_fusion(
-        [
-            ("vetorial", vector_results),
-            ("BM25", bm25_results),
-        ]
-    )
-
-    print(
-        f"Candidatos únicos após RRF: {len(fused_results)}"
-    )
-
-    # 8. Reordenar com o reranker
-    print(
-        f"\nReavaliando até "
-        f"{min(RERANK_CANDIDATES, len(fused_results))} "
-        "candidatos com o reranker..."
-    )
-
-    reranked_results = rerank_results(
-        question,
-        fused_results,
-        reranker,
-    )
-
-    # 9. Exibir os melhores resultados finais
-    print_results(reranked_results)
+    resources = load_search_resources()
+    search(question, resources, top_k=TOP_K, verbose=True)
 
 
 if __name__ == "__main__":
