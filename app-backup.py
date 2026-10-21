@@ -1,9 +1,4 @@
 import uuid
-import sqlite3
-import hashlib
-import hmac
-import secrets
-from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
@@ -39,7 +34,7 @@ st.markdown(
 header[data-testid="stHeader"] {
     visibility: visible !important;
     display: block !important;
-    background: transparent !important;
+    background: ffffff !important;
 }
 
 /* Ícone para reabrir a barra lateral quando ela estiver recolhida. */
@@ -48,7 +43,7 @@ header[data-testid="stHeader"] {
 button[kind="header"] {
     visibility: visible !important;
     display: flex !important;
-    opacity: 1 !important;
+    opacity: 2 !important;
     pointer-events: auto !important;
     color: #142b4a !important;
 }
@@ -249,11 +244,6 @@ header[data-testid="stHeader"] button[kind="header"] svg {
     stroke: #ffffff !important;
 }
 
-
-    .login-wrap { max-width: 460px; margin: 8vh auto 0; padding: 30px; border: 1px solid #e6e7eb; border-radius: 18px; background: #fff; box-shadow: 0 12px 36px rgba(20,43,74,.08); }
-    .login-title { color:#142b4a; font-size:28px; font-weight:750; text-align:center; margin-bottom:6px; }
-    .login-subtitle { color:#777b84; text-align:center; margin-bottom:24px; font-size:14px; }
-    
     </style>
     """,
     unsafe_allow_html=True,
@@ -261,253 +251,43 @@ header[data-testid="stHeader"] button[kind="header"] svg {
 
 
 # ---------------------------------------------------------------------
-# Autenticação e histórico persistente (SQLite)
+# Estado de conversas (por sessão)
 # ---------------------------------------------------------------------
-DB_PATH = Path(__file__).resolve().parent / "kera_users.db"
-
-
-def _db():
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
-def _init_db():
-    with _db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                display_name TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                password_salt TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'user',
-                created_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )
-        """)
-
-
-def _password_hash(password: str, salt_hex: str | None = None):
-    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310_000)
-    return digest.hex(), salt.hex()
-
-
-def _verify_password(password: str, salt_hex: str, expected_hash: str) -> bool:
-    actual_hash, _ = _password_hash(password, salt_hex)
-    return hmac.compare_digest(actual_hash, expected_hash)
-
-
-def _user_count() -> int:
-    with _db() as conn:
-        return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-
-
-def _create_user(username: str, display_name: str, password: str, role: str = "user"):
-    username = username.strip()
-    display_name = display_name.strip() or username
-    if len(username) < 3:
-        raise ValueError("O usuário precisa ter pelo menos 3 caracteres.")
-    if len(password) < 10:
-        raise ValueError("A senha precisa ter pelo menos 10 caracteres.")
-    password_hash, salt = _password_hash(password)
-    with _db() as conn:
-        conn.execute(
-            """INSERT INTO users
-               (username, display_name, password_hash, password_salt, role, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (username, display_name, password_hash, salt, role, datetime.now().isoformat(timespec="seconds")),
-        )
-
-
-def _authenticate(username: str, password: str):
-    with _db() as conn:
-        user = conn.execute(
-            "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
-            (username.strip(),),
-        ).fetchone()
-    if user and _verify_password(password, user["password_salt"], user["password_hash"]):
-        return dict(user)
-    return None
-
-
-def _new_conversation(user_id: int):
-    now = datetime.now().isoformat(timespec="seconds")
-    conversation = {
+def _new_conversation():
+    now = datetime.now()
+    return {
         "id": str(uuid.uuid4()),
-        "user_id": user_id,
         "title": "Nova conversa",
-        "created_at": now,
-        "updated_at": now,
+        "created_at": now.strftime("%d/%m %H:%M"),
         "messages": [],
     }
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (conversation["id"], user_id, conversation["title"], now, now),
-        )
+
+
+if "kera_conversations" not in st.session_state:
+    first = _new_conversation()
+    st.session_state.kera_conversations = [first]
+    st.session_state.kera_active_chat = first["id"]
+
+
+def _active_conversation():
+    active_id = st.session_state.kera_active_chat
+    for conversation in st.session_state.kera_conversations:
+        if conversation["id"] == active_id:
+            return conversation
+    conversation = _new_conversation()
+    st.session_state.kera_conversations.insert(0, conversation)
+    st.session_state.kera_active_chat = conversation["id"]
     return conversation
 
 
-def _load_conversations(user_id: int):
-    with _db() as conn:
-        rows = conn.execute(
-            """SELECT id, user_id, title, created_at, updated_at
-               FROM conversations WHERE user_id = ?
-               ORDER BY updated_at DESC""",
-            (user_id,),
-        ).fetchall()
-        conversations = []
-        for row in rows:
-            message_rows = conn.execute(
-                "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id",
-                (row["id"],),
-            ).fetchall()
-            conversations.append({
-                "id": row["id"],
-                "user_id": row["user_id"],
-                "title": row["title"],
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-                "messages": [{"role": m["role"], "content": m["content"]} for m in message_rows],
-            })
-    return conversations
-
-
-def _save_message(conversation, role: str, content: str):
-    now = datetime.now().isoformat(timespec="seconds")
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (conversation["id"], role, content, now),
-        )
-        conn.execute(
-            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-            (conversation["title"], now, conversation["id"], conversation["user_id"]),
-        )
-    conversation["updated_at"] = now
-
-
-def _save_title(conversation):
-    now = datetime.now().isoformat(timespec="seconds")
-    with _db() as conn:
-        conn.execute(
-            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-            (conversation["title"], now, conversation["id"], conversation["user_id"]),
-        )
-    conversation["updated_at"] = now
-
-
 def _start_new_chat():
-    conversation = _new_conversation(st.session_state.kera_user["id"])
+    conversation = _new_conversation()
     st.session_state.kera_conversations.insert(0, conversation)
     st.session_state.kera_active_chat = conversation["id"]
 
 
-def _active_conversation():
-    active_id = st.session_state.get("kera_active_chat")
-    for conversation in st.session_state.kera_conversations:
-        if conversation["id"] == active_id:
-            return conversation
-    if not st.session_state.kera_conversations:
-        conversation = _new_conversation(st.session_state.kera_user["id"])
-        st.session_state.kera_conversations = [conversation]
-        st.session_state.kera_active_chat = conversation["id"]
-        return conversation
-    conversation = st.session_state.kera_conversations[0]
-    st.session_state.kera_active_chat = conversation["id"]
-    return conversation
-
-
-def _logout():
-    for key in ("kera_user", "kera_conversations", "kera_active_chat"):
-        st.session_state.pop(key, None)
-    st.rerun()
-
-
-_init_db()
-
-# Primeiro acesso: criar o administrador inicial sem senha padrão embutida.
-if _user_count() == 0:
-    st.markdown('<div class="login-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="login-title">Configurar a Kera AI</div>', unsafe_allow_html=True)
-    st.markdown('<div class="login-subtitle">Crie a conta de administrador para começar.</div>', unsafe_allow_html=True)
-    with st.form("kera_first_admin"):
-        admin_name = st.text_input("Nome do administrador")
-        admin_username = st.text_input("Usuário de acesso")
-        admin_password = st.text_input("Senha (mínimo de 10 caracteres)", type="password")
-        admin_password_confirm = st.text_input("Confirme a senha", type="password")
-        submitted = st.form_submit_button("Criar administrador", use_container_width=True, type="primary")
-    if submitted:
-        if admin_password != admin_password_confirm:
-            st.error("As senhas não coincidem.")
-        else:
-            try:
-                _create_user(admin_username, admin_name, admin_password, "admin")
-                st.success("Administrador criado. Entre com suas credenciais.")
-                st.rerun()
-            except (ValueError, sqlite3.IntegrityError) as exc:
-                st.error(str(exc) if isinstance(exc, ValueError) else "Esse nome de usuário já existe.")
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
-
-# Tela de login
-if "kera_user" not in st.session_state:
-    st.markdown('<div class="login-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="login-title">Kera AI</div>', unsafe_allow_html=True)
-    st.markdown('<div class="login-subtitle">Entre para acessar seus chats e o histórico salvo.</div>', unsafe_allow_html=True)
-    with st.form("kera_login"):
-        username = st.text_input("Usuário")
-        password = st.text_input("Senha", type="password")
-        submitted = st.form_submit_button("Entrar", use_container_width=True, type="primary")
-    if submitted:
-        user = _authenticate(username, password)
-        if user:
-            st.session_state.kera_user = user
-            st.session_state.kera_conversations = _load_conversations(user["id"])
-            if not st.session_state.kera_conversations:
-                first = _new_conversation(user["id"])
-                st.session_state.kera_conversations = [first]
-            st.session_state.kera_active_chat = st.session_state.kera_conversations[0]["id"]
-            st.rerun()
-        else:
-            st.error("Usuário ou senha incorretos.")
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
-
-# Garantir que os chats carregados pertencem ao usuário autenticado.
-if "kera_conversations" not in st.session_state:
-    st.session_state.kera_conversations = _load_conversations(st.session_state.kera_user["id"])
-if not st.session_state.kera_conversations:
-    first = _new_conversation(st.session_state.kera_user["id"])
-    st.session_state.kera_conversations = [first]
-if "kera_active_chat" not in st.session_state:
-    st.session_state.kera_active_chat = st.session_state.kera_conversations[0]["id"]
-
-
 # ---------------------------------------------------------------------
-# Barra lateral e gestão básica de usuários
+# Barra lateral inspirada na organização do Biomind
 # ---------------------------------------------------------------------
 with st.sidebar:
     st.markdown(
@@ -522,13 +302,13 @@ with st.sidebar:
         """,
         unsafe_allow_html=True,
     )
-    st.caption(f"Conectado: {st.session_state.kera_user['display_name']}")
 
     if st.button("＋  Nova conversa", use_container_width=True, type="primary"):
         _start_new_chat()
         st.rerun()
 
     st.markdown('<div class="side-label">Histórico de conversas</div>', unsafe_allow_html=True)
+
     for conversation in st.session_state.kera_conversations:
         label = conversation["title"]
         if len(label) > 31:
@@ -545,35 +325,11 @@ with st.sidebar:
             st.session_state.kera_active_chat = conversation["id"]
             st.rerun()
 
-    if st.session_state.kera_user["role"] == "admin":
-        with st.expander("Administrar usuários"):
-            with st.form("kera_create_user"):
-                new_display_name = st.text_input("Nome")
-                new_username = st.text_input("Novo usuário")
-                new_password = st.text_input("Senha inicial (mín. 10 caracteres)", type="password")
-                create_user = st.form_submit_button("Criar usuário", use_container_width=True)
-            if create_user:
-                try:
-                    _create_user(new_username, new_display_name, new_password, "user")
-                    st.success("Usuário criado.")
-                    st.rerun()
-                except (ValueError, sqlite3.IntegrityError) as exc:
-                    st.error(str(exc) if isinstance(exc, ValueError) else "Esse nome de usuário já existe.")
-
-            with _db() as conn:
-                users = conn.execute("SELECT username, display_name, role, created_at FROM users ORDER BY id").fetchall()
-            st.caption("Contas cadastradas")
-            for item in users:
-                st.write(f"**{item['display_name']}** — `{item['username']}` ({item['role']})")
-
-    if st.button("Sair da conta", use_container_width=True):
-        _logout()
-
     st.markdown(
         """
         <div class="sidebar-note">
             <span class="status-dot"></span>Assistente pronto para uso<br>
-            Histórico salvo na base local desta instalação.
+            O histórico fica disponível durante esta sessão.
         </div>
         """,
         unsafe_allow_html=True,
@@ -602,12 +358,11 @@ except Exception as exc:
 
 conversation = _active_conversation()
 
-# Se a primeira pergunta foi enviada, usa-a como título persistente do histórico.
+# Se a primeira pergunta foi enviada, usa-a como título do histórico.
 def _update_title(conv, question):
     if conv["title"] == "Nova conversa":
         clean = " ".join(question.split())
         conv["title"] = clean[:42] + ("…" if len(clean) > 42 else "")
-        _save_title(conv)
 
 
 # ---------------------------------------------------------------------
@@ -650,7 +405,6 @@ question = st.chat_input("Pergunte algo sobre a operação da clínica…")
 if question:
     _update_title(conversation, question)
     conversation["messages"].append({"role": "user", "content": question})
-    _save_message(conversation, "user", question)
 
     with st.chat_message("user"):
         st.markdown(question)
@@ -664,7 +418,6 @@ if question:
                     "role": "assistant",
                     "content": answer,
                 })
-                _save_message(conversation, "assistant", answer)
                 st.markdown(answer)
             except Exception as exc:
                 st.error(
