@@ -268,3 +268,39 @@ header[data-testid="stHeader"] button[kind="header"] svg {
     overflow-x: auto;
     border-radius: 10px;
 }
+
+
+/* Barra de pergunta e estados de geração */
+div[data-testid="stForm"] input[aria-label="Pergunta"] {
+    min-height: 46px;
+}
+div[data-testid="stForm"] button[kind="primary"] {
+    min-height: 46px;
+    min-width: 44px;
+    border-radius: 12px !important;
+    background: #142b4a !important;
+    border-color: #142b4a !important;
+    color: #ffffff !important;
+    font-size: 24px !important;
+    font-weight: 700 !important;
+}
+.kera-working {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #536174;
+    font-size: 0.92rem;
+    margin: 0.35rem 0 0.75rem 0;
+}
+.kera-spinner {
+    width: 17px;
+    height: 17px;
+    border: 2px solid #d8e1ec;
+    border-top-color: #142b4a;
+    border-radius: 50%;
+    display: inline-block;
+    animation: kera-spin 0.8s linear infinite;
+}
+@keyframes kera-spin {
+    to { transform: rotate(360deg); }
+}

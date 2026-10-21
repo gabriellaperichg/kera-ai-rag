@@ -167,3 +167,28 @@ def list_users():
         return conn.execute(
             "SELECT username, display_name, role, created_at FROM users ORDER BY id"
         ).fetchall()
+
+
+def rename_conversation(user_id: int, conversation_id: str, title: str) -> bool:
+    """Renomeia uma conversa pertencente ao usuário informado."""
+    title = " ".join(title.split()).strip()
+    if not title:
+        raise ValueError("O título da conversa não pode ficar vazio.")
+    title = title[:100]
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as conn:
+        cursor = conn.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (title, now, conversation_id, user_id),
+        )
+    return cursor.rowcount > 0
+
+
+def delete_conversation(user_id: int, conversation_id: str) -> bool:
+    """Exclui uma conversa do próprio usuário; mensagens são removidas via FK cascade."""
+    with db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM conversations WHERE id = ? AND user_id = ?",
+            (conversation_id, user_id),
+        )
+    return cursor.rowcount > 0

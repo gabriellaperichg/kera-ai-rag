@@ -1,8 +1,10 @@
 
 import time
+import re
+import threading
 
 from scripts.search_hybrid import search
-from kera.llm import generate_answer
+from kera.llm import generate_answer, GenerationCancelled
 
 
 SYSTEM_PROMPT = """
@@ -256,9 +258,12 @@ def _format_answer(answer: str) -> str:
     return answer.strip()
 
 
-def answer_question(question: str, resources: dict) -> dict:
+def answer_question(question: str, resources: dict, cancel_event: threading.Event | None = None) -> dict:
     """Recupera evidências e gera uma resposta fundamentada."""
     question = (question or "").strip()
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise GenerationCancelled("Geração cancelada pelo usuário.")
 
     if not question:
         return {
@@ -269,7 +274,7 @@ def answer_question(question: str, resources: dict) -> dict:
     print("\n=== KERA RAG ===", flush=True)
     print(f"[RAG] Pergunta: {question}", flush=True)
 
-    # Etapa 1: busca. Mantemos o mecanismo e os parâmetros atuais.
+    # Etapa 1: busca. A busca em si é síncrona; cancelamos logo que ela retornar.
     start_search = time.perf_counter()
 
     try:
@@ -288,6 +293,9 @@ def answer_question(question: str, resources: dict) -> dict:
             ),
             "sources": [],
         }
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise GenerationCancelled("Geração cancelada pelo usuário.")
 
     print(
         f"[RAG] Busca concluída em "
@@ -319,12 +327,17 @@ def answer_question(question: str, resources: dict) -> dict:
     # Etapa 3: prompt específico para a pergunta.
     user_prompt = _build_user_prompt(question, context)
 
-    # Etapa 4: geração pelo Ollama.
+    # Etapa 4: geração pelo Ollama, em streaming para permitir cancelamento.
+    if cancel_event is not None and cancel_event.is_set():
+        raise GenerationCancelled("Geração cancelada pelo usuário.")
+
     print("[RAG] Enviando contexto ao modelo...", flush=True)
     start_generation = time.perf_counter()
 
     try:
-        answer = generate_answer(SYSTEM_PROMPT, user_prompt)
+        answer = generate_answer(SYSTEM_PROMPT, user_prompt, cancel_event=cancel_event)
+    except GenerationCancelled:
+        raise
     except Exception as exc:
         print(
             f"[RAG] Erro na geração: {type(exc).__name__}: {exc}",
